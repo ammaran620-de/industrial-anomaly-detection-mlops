@@ -1,0 +1,32 @@
+category            carpet
+checkpoint          artifacts/patchcore_carpet.pt
+test images         117  (28 good, 89 defective)
+
+threshold-free
+  image AUROC       0.9956
+
+at threshold 2.1189   (95th pct of normal scores)
+  accuracy          0.9658
+  precision         0.9775   of flagged items, this fraction were real defects
+  recall            0.9775   of real defects, this fraction were caught
+  F1                0.9775
+
+  confusion matrix
+    true negative     26   good, passed
+    false positive     2   good, wrongly flagged
+    false negative     2   defective, missed
+    true positive     87   defective, caught
+
+best achievable F1 threshold 2.0183 (uses test labels - reference only)
+
+score distribution
+  normal      mean 1.8626   min 1.6671   max 2.1772
+  defective   mean 2.8365   min 2.0255   max 3.5093
+
+per defect type
+  color          n= 19   mean 2.7064   caught 19/19
+  cut            n= 17   mean 2.9673   caught 17/17
+  good           n= 28   mean 1.8626   passed 26/28
+  hole           n= 17   mean 3.0322   caught 17/17
+  metal_contamination n= 17   mean 2.7518   caught 17/17
+  thread         n= 19   mean 2.7502   caught 17/19

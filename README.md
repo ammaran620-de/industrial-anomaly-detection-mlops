@@ -3,7 +3,9 @@
 Unsupervised surface defect detection, trained on MVTec AD and served behind a
 containerised API with experiment tracking and a basic drift signal.
 
-**99.56% image AUROC on carpet. 87 of 89 defects caught at the operating threshold.**
+**Recorded run on carpet: 99.56% image AUROC; 87 of 89 defects caught at a threshold taken from the test set's own good images.**
+These figures come from the original run, before checkpoint validation, seeding and a held-out calibration split
+were added. They are kept as recorded and labelled below; see [Evaluation protocol](#evaluation-protocol).
 
 The model half is PatchCore. The other half is everything needed before a model
 is useful to anyone: reproducible runs, a serving layer, an evaluation report,
@@ -69,9 +71,27 @@ another 0.4, at 1.6x the fit time. All runs on CPU, no GPU.
 
 The headline 0.9956 comes from the last row only: coreset ratio 0.05, 320 px
 input, 500-patch bank. The first row (0.01, 224 px) is what `src.train` uses if
-you pass no flags. The random pool step has no fixed seed, so these figures are
-one recorded run per configuration and a rerun can differ slightly. The
-recorded output for the headline run is in `reports/carpet/metrics.txt`.
+you pass no flags. These runs predate seeding: the random pool step was not
+seeded, so each figure is one recorded run per configuration and a rerun can
+differ. The recorded output for the headline run is in
+`reports/carpet/metrics.txt`, and `reports/carpet/HISTORICAL.md` says exactly how
+it was produced.
+
+### Evaluation protocol
+
+| | Recorded run (the tables here) | Current code (`src.train`, `src.evaluate`) |
+|---|---|---|
+| Threshold | 95th percentile of the 28 good **test** images | 95th percentile of held-out **normal training** images, excluded from the memory bank |
+| Independent of the test set | No: about 5% of those good images are flagged by construction | Yes |
+| Random seed | None | `--seed`, default 0; seeds the pool subsample, the k-center start and the calibration split |
+| Checkpoint | Weights only; nothing checked on load | Records config, preprocessing, seed and threshold; refuses to load if any of them disagrees with the model or request |
+| Output directory | `reports/carpet/` (overwritten each run) | `reports/<category>/runs/<run-name>/`, a new directory every run |
+
+No run with the current protocol is reported here. It needs the MVTec AD carpet
+data and the pretrained WideResNet-50 weights, and neither was reachable when this
+was written, so every number in this README is from the recorded run. Rerun the
+commands below to get seeded, calibrated figures; they will not necessarily equal
+these.
 
 ### Performance at the operating threshold
 
@@ -127,12 +147,16 @@ threshold should sit **below** the balanced point, accepting more false
 positives to reduce misses.
 
 The 95th-percentile rule above is deliberately the version that works with
-normal data only. In `src/evaluate.py` it is computed from the 28 good test
-images, so the same images are used to set the threshold and to score it, and
-about 5% of them (here 2 of 28) are flagged by construction. In production the
-threshold should come from held-out normal images. The best-achievable F1 threshold (2.0183) requires test
-labels and could not be computed in production — it is reported as a reference
-bound, not a recommendation.
+normal data only. In the recorded run it was computed from the 28 good test
+images, so the same images set the threshold and scored it, and about 5% of them
+(here 2 of 28) were flagged by construction. The current `src.train` instead holds
+out a fraction of the normal training images (`--calibration-fraction`, default
+0.1), builds the memory bank from the rest, and stores the 95th percentile of the
+held-out scores in the checkpoint. `src.evaluate` and the API use that stored
+value, so the test set plays no part in choosing it. A checkpoint without a
+calibration falls back to the old test-derived rule, and the report says so. The
+best-achievable F1 threshold (2.0183 in the recorded run) requires test labels and
+could not be computed in production: it is a reference bound, not a recommendation.
 
 ---
 
@@ -143,8 +167,8 @@ pip install -r requirements.txt
 
 # MVTec AD requires registration: mvtec.com/company/research/datasets/mvtec-ad
 # Extract a category into ./data, then:
-python -m src.train --category carpet --coreset-ratio 0.05 --input-size 320
-python -m src.evaluate --category carpet --input-size 320
+python -m src.train --category carpet --coreset-ratio 0.05 --input-size 320 --seed 0
+python -m src.evaluate --category carpet --run-name seed0
 
 python -m mlflow ui                          # runs at localhost:5000
 python -m uvicorn src.api:app --reload       # API at localhost:8000/docs
@@ -152,9 +176,16 @@ python -m uvicorn src.api:app --reload       # API at localhost:8000/docs
 
 The trained checkpoint (`artifacts/patchcore_carpet.pt`, or the path in `MODEL_PATH`) is not committed. Until `src.train` has produced it, the server starts but `/health` reports `model_loaded: false` and `/predict` returns 503. A healthy server on its own does not mean inference works.
 
-`src.train` defaults to 0.01 and 224 px, `src.evaluate` and the API default to
-320 px. Pass the flags above when training, and set `INPUT_SIZE` to the same
-value when serving, or scores will not match the documented results.
+`src.train` defaults to 0.01 and 224 px, so pass the flags above to reproduce the
+0.05 / 320 px configuration. Nothing else needs to match: the checkpoint records its
+own input size, layers, preprocessing and threshold, and `src.evaluate` and the API
+read them from it. If you pass `--input-size` to `src.evaluate` or set `INPUT_SIZE`
+for the API, the value must equal the checkpoint's; a different one is an error, not a
+silent resize. `THRESHOLD` is an optional override; unset, the calibrated value in
+the checkpoint is used.
+
+The memory bank is `coreset_ratio` times a pool of at most 10,000 randomly chosen
+patches, so a ratio of 0.05 gives 500 patches and 0.01 gives 100.
 
 With Docker:
 
@@ -168,9 +199,15 @@ docker compose up --build
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /health` | Liveness, and whether a model is loaded |
+| `GET /health` | Liveness, whether a model is loaded, and if so its input size, threshold, where the threshold came from, and seed |
 | `POST /predict` | Multipart image to score, verdict, latency |
 | `GET /stats` | Rolling mean, p95 and anomaly rate over recent requests |
+
+The checkpoint is loaded once, at startup. A missing file leaves the server up with
+no model (`/predict` returns 503). A checkpoint that disagrees with the code or with
+`INPUT_SIZE`, that cannot be read safely, or that has no threshold when `THRESHOLD`
+is unset stops the server with an error naming the mismatch, rather than serving
+scores that mean something else. Checkpoints are opened with `weights_only=True`.
 
 `/stats` is a cheap drift signal. If the live mean drifts from the validation
 value, the input distribution has moved — new material, changed lighting, a
@@ -190,6 +227,11 @@ GPU or edge accelerator inference, none of which is addressed here.
 
 **Thread defects.** 2/19 missed. Low-contrast linear defects are the weak spot;
 higher resolution or a defect-specific supervised head would help.
+
+**Checkpoint and data not in the repo.** The numbers above cannot be regenerated from
+this repository alone: MVTec AD needs registration and the pretrained weights are
+downloaded by torchvision. The tests use a small deterministic backbone, so they
+verify configuration checking, seeding, calibration and serving, not detection quality.
 
 **Single category.** Tuned on carpet only. Other MVTec categories need their
 own threshold, and probably their own coreset ratio.
@@ -213,12 +255,12 @@ gradual ones. Proper distribution-distance testing is the right fix.
 
 ```
 src/model.py     PatchCore: feature extraction, coreset, scoring
-src/data.py      MVTec loading
-src/train.py     Training + evaluation, logged to MLflow
-src/evaluate.py  Full metrics report, per-image CSV, box visualisations
-src/api.py       FastAPI serving
-tests/           API tests, run in CI
-reports/         Generated metrics and visualisations
+src/data.py      MVTec loading, preprocessing config, fit/calibration split
+src/train.py     Training, threshold calibration, evaluation, logged to MLflow
+src/evaluate.py  Full metrics report, per-image CSV, box visualisations (new directory per run)
+src/api.py       FastAPI serving; the checkpoint is loaded in the app lifespan
+tests/           Checkpoint validation, seeding, calibration, API (run in CI)
+reports/carpet/  The original recorded run, unchanged (see HISTORICAL.md); new runs go in runs/
 Dockerfile       CPU-only image
 ```
 

@@ -16,8 +16,8 @@ RUN pip install --no-cache-dir torch torchvision \
 COPY src/ ./src/
 COPY artifacts/ ./artifacts/
 
+# THRESHOLD and INPUT_SIZE are deliberately not set: the service takes both from the checkpoint.
 ENV MODEL_PATH=artifacts/patchcore_carpet.pt \
-    THRESHOLD=3.0 \
     PYTHONUNBUFFERED=1
 
 EXPOSE 8000

@@ -180,9 +180,13 @@ nudged camera — and the threshold needs revisiting.
 
 ## Known limitations
 
-**Latency.** 535 ms per image on CPU. A line running at 30 fps needs 33 ms.
-Closing that gap needs ONNX export, quantisation, and GPU or edge accelerator
-inference — not addressed here.
+**Latency.** Not measured in this repository. An earlier version of this README
+gave 535 ms per image on CPU, but no script or recorded output here supports
+that number, so do not treat it as a result. `/predict` returns a `latency_ms`
+field timed around preprocessing and scoring (not model loading), so you can
+measure it on your own machine once a checkpoint exists. A line running at
+30 fps needs 33 ms; closing that gap would need ONNX export, quantisation, and
+GPU or edge accelerator inference, none of which is addressed here.
 
 **Thread defects.** 2/19 missed. Low-contrast linear defects are the weak spot;
 higher resolution or a defect-specific supervised head would help.

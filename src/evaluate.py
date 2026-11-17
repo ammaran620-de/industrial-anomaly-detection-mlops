@@ -1,11 +1,18 @@
 """Full evaluation: metrics, per-image CSV, and bounding-box visualisations.
 
-    python -m src.evaluate --category carpet
+    python -m src.evaluate --category carpet [--run-name my-run]
 
-Produces, under reports/<category>/:
+Produces, under reports/<category>/runs/<run-name>/ (a new directory every time):
     metrics.txt      the numbers, including a per-defect-type breakdown
     per_image.csv    one row per test image: path, label, score, verdict
     vis/*.png        original | heatmap | boxes, for a sample of images
+
+The files directly in reports/<category>/ are the original recorded run (see HISTORICAL.md there).
+They are never overwritten.
+
+The threshold comes from the checkpoint's calibration on held-out normal training images. If the
+checkpoint has none, it falls back to the 95th percentile of the good TEST images, which is the
+original protocol: it is not independent of the test set and the report says so.
 
 Why this exists: AUROC alone tells you the ranking is good, not whether the
 system works at a chosen threshold. Precision and recall at a real threshold
@@ -16,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime, timezone
 from pathlib import Path
 
 import matplotlib
@@ -80,6 +88,29 @@ def pick_threshold(scores: np.ndarray, labels: np.ndarray) -> tuple[float, float
     return percentile_thr, best_thr
 
 
+def new_run_dir(out_root: str, category: str, run_name: str | None = None, now: datetime | None = None) -> Path:
+    """reports/<category>/runs/<run-name>, created fresh. Refuses to reuse a directory, so a
+    new run can never overwrite an earlier one."""
+    stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%SZ")
+    path = Path(out_root) / category / "runs" / (run_name or stamp)
+    if path.exists():
+        raise FileExistsError(f"{path} already exists; pick another --run-name")
+    path.mkdir(parents=True)
+    return path
+
+
+def choose_threshold(cli: float | None, calibrated: dict | None, test_derived: float) -> tuple[float, str]:
+    """Return (threshold, human-readable source). Explicit value > checkpoint calibration > test-derived."""
+    if cli is not None:
+        return cli, "command-line --threshold"
+    if calibrated:
+        return float(calibrated["value"]), (
+            f"checkpoint calibration: p{calibrated['percentile']:g} of {calibrated['n_calibration']} "
+            "held-out normal training images (independent of the test set)")
+    return test_derived, ("95th percentile of the good TEST images (original protocol; NOT independent of "
+                          "the test set, about 5% of those images are flagged by construction)")
+
+
 def boxes_from_map(amap: np.ndarray, thr: float, min_area: int = 80):
     """Threshold the anomaly map, then bound each connected blob.
 
@@ -138,27 +169,29 @@ def main() -> None:
     p.add_argument("--category", default="carpet")
     p.add_argument("--data-root", default="data")
     p.add_argument("--checkpoint", default=None)
-    p.add_argument("--input-size", type=int, default=320)
+    p.add_argument("--input-size", type=int, default=None, help="must equal the checkpoint's; default: use the checkpoint's")
+    p.add_argument("--run-name", default=None, help="name of the new directory under reports/<category>/runs/")
     p.add_argument("--threshold", type=float, default=None)
     p.add_argument("--n-vis", type=int, default=12)
     p.add_argument("--out", default="reports")
     args = p.parse_args()
 
     ckpt = args.checkpoint or f"artifacts/patchcore_{args.category}.pt"
-    out_dir = Path(args.out) / args.category
+    out_dir = new_run_dir(args.out, args.category, args.run_name)
     vis_dir = out_dir / "vis"
     vis_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"loading {ckpt}")
-    model = PatchCore(input_size=args.input_size).load(ckpt)
+    model = PatchCore.from_checkpoint(ckpt, input_size=args.input_size)
+    args.input_size = model.input_size
 
-    ds = MVTecDataset(args.data_root, args.category, "test", args.input_size)
+    ds = MVTecDataset(args.data_root, args.category, "test", model.input_size)
     print(f"scoring {len(ds)} test images")
     scores, labels, defects, paths, maps = collect(model, ds)
 
     auroc = roc_auc_score(labels, scores)
     pct_thr, f1_thr = pick_threshold(scores, labels)
-    thr = args.threshold if args.threshold is not None else pct_thr
+    thr, thr_source = choose_threshold(args.threshold, model.threshold, pct_thr)
 
     preds = (scores > thr).astype(int)
     tn, fp, fn, tp = confusion_matrix(labels, preds).ravel()
@@ -169,15 +202,20 @@ def main() -> None:
 
     lines = []
     add = lines.append
+    cfg = model.config()
+    add(f"run                 {out_dir.name}  (new protocol run; not comparable with the historical reports/{args.category}/metrics.txt without noting the differences)")
     add(f"category            {args.category}")
     add(f"checkpoint          {ckpt}")
+    add(f"model               input {cfg['input_size']} px, layers {','.join(cfg['layers'])}, "
+        f"coreset ratio {cfg['coreset_ratio']}, bank {cfg['bank_size']} patches, seed {cfg['seed']}")
     add(f"test images         {len(labels)}  ({int((labels==0).sum())} good, "
         f"{int((labels==1).sum())} defective)")
     add("")
     add("threshold-free")
     add(f"  image AUROC       {auroc:.4f}")
     add("")
-    add(f"at threshold {thr:.4f}   (95th pct of normal scores)")
+    add(f"at threshold {thr:.4f}")
+    add(f"  threshold source  {thr_source}")
     add(f"  accuracy          {accuracy:.4f}")
     add(f"  precision         {precision:.4f}   of flagged items, this fraction were real defects")
     add(f"  recall            {recall:.4f}   of real defects, this fraction were caught")

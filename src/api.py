@@ -23,14 +23,18 @@ from PIL import Image
 from pydantic import BaseModel
 
 from src.data import build_transform
-from src.model import PatchCore
+from src.model import CheckpointError, PatchCore
 
 MODEL_PATH = os.getenv("MODEL_PATH", "artifacts/patchcore_carpet.pt")
-THRESHOLD = float(os.getenv("THRESHOLD", "2.12"))
-INPUT_SIZE = int(os.getenv("INPUT_SIZE", "320"))
+# Optional overrides. Left unset, the input size and the threshold come from the checkpoint.
+# INPUT_SIZE, if set, must equal the checkpoint's; a different value refuses to start.
+INPUT_SIZE = os.getenv("INPUT_SIZE")
+THRESHOLD = os.getenv("THRESHOLD")
 
 model: PatchCore | None = None
-transform = build_transform(INPUT_SIZE)
+transform = None
+threshold: float | None = None
+threshold_source: str | None = None
 
 # Rolling window of recent scores. Cheap, memory-bounded drift signal: if the
 # live mean drifts away from the value observed at validation, the input
@@ -45,14 +49,35 @@ class Prediction(BaseModel):
     latency_ms: float
 
 
+def _load_model() -> None:
+    """Load the checkpoint if there is one. An incompatible checkpoint raises CheckpointError,
+    so the server refuses to start rather than serving scores that mean something else."""
+    global model, transform, threshold, threshold_source
+    model, transform, threshold, threshold_source = None, None, None, None
+    recent_scores.clear()
+
+    if not os.path.exists(MODEL_PATH):
+        print(f"[warn] no model at {MODEL_PATH}; /predict will 503")
+        return
+
+    loaded = PatchCore.from_checkpoint(MODEL_PATH, input_size=int(INPUT_SIZE) if INPUT_SIZE else None)
+    if THRESHOLD:
+        value, source = float(THRESHOLD), "THRESHOLD environment variable"
+    elif loaded.threshold:
+        value, source = float(loaded.threshold["value"]), "checkpoint calibration"
+    else:
+        raise CheckpointError(
+            f"{MODEL_PATH} has no calibrated threshold (it predates calibration or was trained with "
+            "--calibration-fraction 0); set THRESHOLD explicitly"
+        )
+    model, threshold, threshold_source = loaded, value, source
+    transform = build_transform(loaded.input_size)
+    print(f"[ok] loaded {MODEL_PATH} (input {loaded.input_size}, threshold {value:.4f} from {source})")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global model
-    if os.path.exists(MODEL_PATH):
-        model = PatchCore(input_size=INPUT_SIZE).load(MODEL_PATH)
-        print(f"[ok] loaded {MODEL_PATH}")
-    else:
-        print(f"[warn] no model at {MODEL_PATH}; /predict will 503")
+    _load_model()
     yield
 
 
@@ -65,6 +90,10 @@ def health() -> dict:
         "status": "ok",
         "model_loaded": model is not None,
         "model_path": MODEL_PATH,
+        "input_size": model.input_size if model else None,
+        "threshold": threshold,
+        "threshold_source": threshold_source,
+        "seed": model.seed if model else None,
     }
 
 
@@ -90,8 +119,8 @@ async def predict(file: UploadFile = File(...)) -> Prediction:
 
     return Prediction(
         anomaly_score=score,
-        is_anomalous=score > THRESHOLD,
-        threshold=THRESHOLD,
+        is_anomalous=score > threshold,
+        threshold=threshold,
         latency_ms=round(latency_ms, 2),
     )
 
@@ -106,5 +135,5 @@ def stats() -> dict:
         "n": len(arr),
         "mean_score": round(float(arr.mean()), 4),
         "p95_score": round(float(np.percentile(arr, 95)), 4),
-        "anomaly_rate": round(float((arr > THRESHOLD).mean()), 4),
+        "anomaly_rate": round(float((arr > threshold).mean()), 4) if threshold is not None else None,
     }

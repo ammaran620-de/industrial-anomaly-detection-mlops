@@ -138,6 +138,8 @@ python -m mlflow ui                          # runs at localhost:5000
 python -m uvicorn src.api:app --reload       # API at localhost:8000/docs
 ```
 
+The trained checkpoint (`artifacts/patchcore_carpet.pt`, or the path in `MODEL_PATH`) is not committed. Until `src.train` has produced it, the server starts but `/health` reports `model_loaded: false` and `/predict` returns 503. A healthy server on its own does not mean inference works.
+
 With Docker:
 
 ```bash

@@ -270,3 +270,7 @@ Dockerfile       CPU-only image
 
 Roth et al., *Towards Total Recall in Industrial Anomaly Detection*, CVPR 2022.
 Dataset: MVTec AD (Bergmann et al.), CC BY-NC-SA 4.0, non-commercial research use.
+
+## Licence
+
+The code is MIT (`LICENSE`). The MVTec-derived images in `reports/carpet/vis/` are CC BY-NC-SA 4.0 and the ImageNet-pretrained backbone weights have their own terms, so the pipeline is a research and education project. `THIRD_PARTY_NOTICES.md` has the details.

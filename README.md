@@ -33,7 +33,10 @@ types are caught by construction rather than by anticipation.
 2. Each patch is average-pooled against its 3x3 neighbourhood, making the
    representation tolerant of small misalignments.
 3. Patches from every normal training image go into a memory bank.
-4. **Coreset subsampling** cuts the bank to ~1-5% via greedy k-center.
+4. **Coreset subsampling** shrinks the bank in two steps (see `PatchCore.fit`):
+   the patches are first randomly subsampled to a pool of at most 10,000 (the
+   full set is about 200,000), then greedy k-center keeps `coreset_ratio` of that
+   pool. A ratio of 0.05 therefore keeps 500 patches.
 5. At inference, each patch's distance to its nearest neighbour in the bank is
    its score. Image score is the max over patches; the upsampled grid is a
    heatmap showing *where*.
@@ -63,6 +66,12 @@ picks points maximising coverage, preserving that tail.
 
 A 5x larger memory bank buys 1.2 points of AUROC. Higher resolution buys
 another 0.4, at 1.6x the fit time. All runs on CPU, no GPU.
+
+The headline 0.9956 comes from the last row only: coreset ratio 0.05, 320 px
+input, 500-patch bank. The first row (0.01, 224 px) is what `src.train` uses if
+you pass no flags. The random pool step has no fixed seed, so these figures are
+one recorded run per configuration and a rerun can differ slightly. The
+recorded output for the headline run is in `reports/carpet/metrics.txt`.
 
 ### Performance at the operating threshold
 
@@ -118,7 +127,10 @@ threshold should sit **below** the balanced point, accepting more false
 positives to reduce misses.
 
 The 95th-percentile rule above is deliberately the version that works with
-normal data only. The best-achievable F1 threshold (2.0183) requires test
+normal data only. In `src/evaluate.py` it is computed from the 28 good test
+images, so the same images are used to set the threshold and to score it, and
+about 5% of them (here 2 of 28) are flagged by construction. In production the
+threshold should come from held-out normal images. The best-achievable F1 threshold (2.0183) requires test
 labels and could not be computed in production — it is reported as a reference
 bound, not a recommendation.
 
@@ -137,6 +149,10 @@ python -m src.evaluate --category carpet --input-size 320
 python -m mlflow ui                          # runs at localhost:5000
 python -m uvicorn src.api:app --reload       # API at localhost:8000/docs
 ```
+
+`src.train` defaults to 0.01 and 224 px, `src.evaluate` and the API default to
+320 px. Pass the flags above when training, and set `INPUT_SIZE` to the same
+value when serving, or scores will not match the documented results.
 
 With Docker:
 
